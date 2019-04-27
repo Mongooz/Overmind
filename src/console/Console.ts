@@ -1,4 +1,4 @@
-import {Colony} from '../Colony';
+import {Colony, ColonyMemory} from '../Colony';
 import {color, toColumns} from '../utilities/utils';
 import {asciiLogoSmall} from '../visuals/logos';
 import {log} from './log';
@@ -24,6 +24,8 @@ export class OvermindConsole {
 		global.print = this.print;
 		global.timeit = this.timeit;
 		global.setLogLevel = log.setLogLevel;
+		global.suspendColony = this.suspendColony;
+		global.unsuspendColony = this.unsuspendColony;
 		global.openRoomPlanner = this.openRoomPlanner;
 		global.closeRoomPlanner = this.closeRoomPlanner;
 		global.cancelRoomPlanner = this.cancelRoomPlanner;
@@ -41,6 +43,7 @@ export class OvermindConsole {
 		global.startRemoteDebugSession = this.startRemoteDebugSession;
 		global.endRemoteDebugSession = this.endRemoteDebugSession;
 		global.profileMemory = this.profileMemory;
+		global.cancelMarketOrders = this.cancelMarketOrders;
 	}
 
 	// Help, information, and operational changes ======================================================================
@@ -63,6 +66,8 @@ export class OvermindConsole {
 		descr['stopDebug(thing)'] = 'disable debug logging for a game object or process';
 		descr['timeit(function, repeat=1)'] = 'time the execution of a snippet of code';
 		descr['setLogLevel(int)'] = 'set the logging level from 0 - 4';
+		descr['suspendColony(roomName)'] = 'suspend operations within a colony';
+		descr['unsuspendColony(roomName)'] = 'resume operations within a suspended colony';
 		descr['openRoomPlanner(roomName)'] = 'open the room planner for a room';
 		descr['closeRoomPlanner(roomName)'] = 'close the room planner and save changes';
 		descr['cancelRoomPlanner(roomName)'] = 'close the room planner and discard changes';
@@ -78,6 +83,7 @@ export class OvermindConsole {
 		descr['deepCleanMemory()'] = 'deletes all non-critical portions of memory (be careful!)';
 		descr['profileMemory(depth=1)'] = 'scan through memory to get the size of various objects';
 		descr['startRemoteDebugSession()'] = 'enables the remote debugger so Muon can debug your code';
+		descr['cancelMarketOrders(filter?)'] = 'cancels all market orders matching filter (if provided)';
 		// Console list
 		let descrMsg = toColumns(descr, {justify: true, padChar: '.'});
 		let maxLineLength = _.max(_.map(descrMsg, line => line.length)) + 2;
@@ -205,6 +211,38 @@ export class OvermindConsole {
 		return `CPU used: ${used}. Repetitions: ${repeat} (${used / repeat} each).`;
 	}
 
+
+	// Colony suspension ===============================================================================================
+
+	static suspendColony(roomName: string): string {
+		if (Overmind.colonies[roomName]) {
+			let colonyMemory = Memory.colonies[roomName] as ColonyMemory | undefined;
+			if (colonyMemory) {
+				colonyMemory.suspend = true;
+				Overmind.shouldBuild = true;
+				return `Colony ${roomName} suspended.`;
+			} else {
+				return `No colony memory for ${roomName}!`;
+			}
+		} else {
+			return `Colony ${roomName} is not a valid colony!`;
+		}
+	}
+
+	static unsuspendColony(roomName: string): string {
+		let colonyMemory = Memory.colonies[roomName] as ColonyMemory | undefined;
+		if (colonyMemory) {
+			if (!colonyMemory.suspend) {
+				return `Colony ${roomName} is not suspended!`;
+			} else {
+				delete colonyMemory.suspend;
+				Overmind.shouldBuild = true;
+				return `Colony ${roomName} unsuspended.`;
+			}
+		} else {
+			return `No colony memory for ${roomName}!`;
+		}
+	}
 
 	// Room planner control ============================================================================================
 
@@ -432,6 +470,12 @@ export class OvermindConsole {
 		OvermindConsole.recursiveMemoryProfile(Memory, sizes, depth);
 		console.log(`Time elapsed: ${Game.cpu.getUsed() - start}`);
 		return JSON.stringify(sizes, undefined, '\t');
+	}
+
+	static cancelMarketOrders(filter?: (order: Order) => any): string {
+		let ordersToCancel = !!filter ? _.filter(Game.market.orders, order => filter(order)) : Game.market.orders;
+		_.forEach(_.values(ordersToCancel), (order: Order) => Game.market.cancelOrder(order.id));
+		return `Canceled ${_.values(ordersToCancel).length} orders.`;
 	}
 
 }

@@ -12,13 +12,15 @@ export class DirectiveNukeResponse extends Directive {
 	static directiveName = 'nukeResponse';
 	static color = COLOR_ORANGE;
 	static secondaryColor = COLOR_BLUE;
+
 	static requiredRCL = 4;
 
 	nuke: Nuke | undefined;
 	room: Room;
 
 	constructor(flag: Flag) {
-		super(flag, DirectiveNukeResponse.requiredRCL);
+		super(flag, colony => colony.name == Directive.getPos(flag).roomName
+							  && colony.level >= DirectiveNukeResponse.requiredRCL);
 		this.refresh();
 	}
 

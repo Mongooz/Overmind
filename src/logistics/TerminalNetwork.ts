@@ -9,7 +9,7 @@ import {baseStockAmounts, priorityStockAmounts, wantedStockAmounts} from '../res
 import {alignedNewline, bullet, rightArrow} from '../utilities/stringConstants';
 import {assimilationLocked} from '../assimilation/decorator';
 import {$} from '../caching/GlobalCache';
-import {MAX_ENERGY_SELL_ORDERS} from './TradeNetwork';
+import {MAX_ENERGY_BUY_ORDERS, MAX_ENERGY_SELL_ORDERS, TraderJoe} from './TradeNetwork';
 
 interface TerminalNetworkMemory {
 	equalizeIndex: number;
@@ -74,12 +74,12 @@ export class TerminalNetwork implements ITerminalNetwork {
 	};
 
 	static settings = {
-		equalize: {
+		equalize          : {
 			frequency         : 2 * (TERMINAL_COOLDOWN + 1),
 			maxEnergySendSize : 25000,
 			maxMineralSendSize: 5000,
 			tolerance         : {
-				[RESOURCE_ENERGY]: 150000,
+				[RESOURCE_ENERGY]: 100000,
 				[RESOURCE_POWER] : 2000,
 				default          : 5000
 			} as { [resourceType: string]: number },
@@ -94,7 +94,8 @@ export class TerminalNetwork implements ITerminalNetwork {
 				RESOURCE_OXYGEN,
 				RESOURCE_HYDROGEN,
 			],
-		}
+		},
+		buyEnergyThreshold: 200000, // buy energy off market if average amount is less than this
 	};
 
 	constructor(terminals: StructureTerminal[]) {
@@ -186,6 +187,9 @@ export class TerminalNetwork implements ITerminalNetwork {
 		return energyInRoom;
 	}
 
+	/**
+	 * Transfer resources from one terminal to another, logging the results
+	 */
 	private transfer(sender: StructureTerminal, receiver: StructureTerminal, resourceType: ResourceConstant,
 					 amount: number, description: string): number {
 		let cost = Game.market.calcTransactionCost(amount, sender.room.name, receiver.room.name);
@@ -210,6 +214,9 @@ export class TerminalNetwork implements ITerminalNetwork {
 		return response;
 	}
 
+	/**
+	 * Request resources from the terminal network, purchasing from market if unavailable and allowable
+	 */
 	requestResource(receiver: StructureTerminal, resourceType: ResourceConstant, amount: number,
 					allowBuy = true, minDifference = 4000): void {
 		if (this.exceptionTerminals[receiver.ref]) {
@@ -233,9 +240,7 @@ export class TerminalNetwork implements ITerminalNetwork {
 	 */
 	private handleExcess(terminal: StructureTerminal, threshold = 25000): void {
 
-		let terminalNearCapacity = _.sum(terminal.store) > 0.9 * terminal.storeCapacity;
-		let energyOrders = _.filter(Game.market.orders, order => order.type == ORDER_SELL &&
-																 order.resourceType == RESOURCE_ENERGY);
+		let terminalNearCapacity = _.sum(terminal.store) > 0.95 * terminal.storeCapacity;
 
 		for (let resource in terminal.store) {
 			if (resource == RESOURCE_POWER) {
@@ -245,15 +250,25 @@ export class TerminalNetwork implements ITerminalNetwork {
 
 				let energyThreshold = Energetics.settings.terminal.energy.outThreshold;
 				if (terminalNearCapacity) { // if you're close to full, be more agressive with selling energy
-					energyThreshold = Energetics.settings.terminal.energy.equilibrium;
+					energyThreshold = Energetics.settings.terminal.energy.equilibrium
+									  + Energetics.settings.terminal.energy.tolerance;
 				}
+				let amount = Energetics.settings.terminal.energy.tradeAmount;
 				if (terminal.store[RESOURCE_ENERGY] > energyThreshold) {
-					if (terminalNearCapacity) { // just get rid of stuff at high capacities
-						let response = Overmind.tradeNetwork.sellDirectly(terminal, RESOURCE_ENERGY, 10000, true);
-						if (response == OK) return;
-					} else if (energyOrders.length < MAX_ENERGY_SELL_ORDERS) {
-						let response = Overmind.tradeNetwork.sell(terminal, RESOURCE_ENERGY, 50000);
-						if (response == OK) return;
+					// don't do anything if you have storage that is below energy cap and energy can be moved there
+					const storage = colonyOf(terminal).storage;
+					const storageEnergyCap = Energetics.settings.storage.total.cap;
+					if (!storage || storage.energy >= storageEnergyCap) {
+
+						if (terminalNearCapacity) { // just get rid of stuff at high capacities
+							let response = Overmind.tradeNetwork.sellDirectly(terminal, RESOURCE_ENERGY, amount, true);
+							if (response == OK) return;
+						} else {
+							let response = Overmind.tradeNetwork.sell(terminal, RESOURCE_ENERGY, amount,
+																	  MAX_ENERGY_SELL_ORDERS);
+							if (response == OK) return;
+						}
+
 					}
 				}
 
@@ -363,13 +378,11 @@ export class TerminalNetwork implements ITerminalNetwork {
 		let resourceEqualizeOrder = equalizeResources.slice(this.memory.equalizeIndex + 1)
 													 .concat(equalizeResources.slice(0, this.memory.equalizeIndex + 1));
 		let allColonies = getAllColonies();
-		let tolerance = TerminalNetwork.settings.equalize.tolerance.default;
-		let nextResourceType = _.find(resourceEqualizeOrder, function (resource) {
-			for (let col of allColonies) {
-				if (wantedAmount(col, resource) < -1 * tolerance) { // colony has too much
-					return true;
-				}
-			}
+		let nextResourceType = _.find(resourceEqualizeOrder, resource => {
+			const amounts = _.map(this.terminals, terminal => colonyOf(terminal).assets[resource] || 0);
+			const tolerance = TerminalNetwork.settings.equalize.tolerance[resource]
+							  || TerminalNetwork.settings.equalize.tolerance.default;
+			return _.max(amounts) - _.min(amounts) > tolerance;
 		});
 		// Set next equalize resource index
 		this.memory.equalizeIndex = _.findIndex(equalizeResources, resource => resource == nextResourceType);
@@ -381,7 +394,7 @@ export class TerminalNetwork implements ITerminalNetwork {
 	registerTerminalState(terminal: StructureTerminal, state: TerminalState): void {
 		this.exceptionTerminals[terminal.ref] = state;
 		colonyOf(terminal).terminalState = state;
-		_.remove(this.terminals, t => t.ref == terminal.ref);
+		_.remove(this.terminals, t => t.id == terminal.id);
 	}
 
 	/**
@@ -393,39 +406,39 @@ export class TerminalNetwork implements ITerminalNetwork {
 															  : TerminalNetwork.settings.equalize.maxMineralSendSize;
 			let amount = (terminal.store[resourceType] || 0);
 			let targetAmount = state.amounts[resourceType] || 0;
-			// Terminal output state - push resources away from this colony
-			if (state.type == 'out') {
-				if (amount > targetAmount + state.tolerance) {
-					if (terminal.cooldown > 0) {
-						continue;
-					}
-					let receiver = minBy(this.terminals, t => _.sum(t.store));
-					if (!receiver) return;
-					let sendAmount: number;
-					if (resourceType == RESOURCE_ENERGY) {
-						let cost = Game.market.calcTransactionCost(amount, terminal.room.name, receiver.room.name);
-						sendAmount = minMax(amount - targetAmount - cost, TERMINAL_MIN_SEND, maxSendSize);
-					} else {
-						sendAmount = minMax(amount - targetAmount, TERMINAL_MIN_SEND, maxSendSize);
-					}
-					if (receiver && receiver.storeCapacity - _.sum(receiver.store) > sendAmount) {
-						this.transfer(terminal, receiver, resourceType, sendAmount, 'exception state');
-						return;
+			let tolerance = targetAmount == 0 ? TERMINAL_MIN_SEND : state.tolerance;
+			// Terminal input state - request resources be sent to this colony
+			if (state.type == 'in' || state.type == 'in/out') {
+				if (amount < targetAmount - tolerance) {
+					// Request needed resources from most plentiful colony
+					let sender = maxBy(this.readyTerminals, t => t.store[resourceType] || 0);
+					if (sender) {
+						let receiveAmount = minMax(targetAmount - amount, TERMINAL_MIN_SEND, maxSendSize);
+						if ((sender.store[resourceType] || 0) > TERMINAL_MIN_SEND) {
+							this.transfer(sender, terminal, resourceType, receiveAmount, 'exception state in');
+							_.remove(this.readyTerminals, t => t.ref == sender!.ref);
+						}
 					}
 				}
 			}
-			// Terminal input state - request resources be sent to this colony
-			if (state.type == 'in') {
-				if (amount < targetAmount - state.tolerance) {
-					// Request needed resources from most plentiful colony
-					let sender = maxBy(this.readyTerminals, t => t.store[resourceType] || 0);
-					if (!sender) return;
-					let receiveAmount = minMax(targetAmount - amount, TERMINAL_MIN_SEND, maxSendSize);
-					if (sender && (sender.store[resourceType] || 0) > TERMINAL_MIN_SEND) {
-						this.transfer(sender, terminal, resourceType, receiveAmount, 'exception state');
-						_.remove(this.readyTerminals, t => t.ref == sender!.ref);
-						return;
+			// Terminal output state - push resources away from this colony
+			if (state.type == 'out' || state.type == 'in/out') {
+				if (terminal.cooldown == 0 && amount > targetAmount + tolerance) {
+					let receiver = minBy(this.terminals, t => _.sum(t.store));
+					if (receiver) {
+						let sendAmount: number;
+						if (resourceType == RESOURCE_ENERGY) {
+							let cost = Game.market.calcTransactionCost(amount, terminal.room.name, receiver.room.name);
+							sendAmount = minMax(amount - targetAmount - cost, TERMINAL_MIN_SEND, maxSendSize);
+						} else {
+							sendAmount = minMax(amount - targetAmount, TERMINAL_MIN_SEND, maxSendSize);
+						}
+						if (receiver.storeCapacity - _.sum(receiver.store) > sendAmount) {
+							this.transfer(terminal, receiver, resourceType, sendAmount, 'exception state out');
+							return;
+						}
 					}
+
 				}
 			}
 		}
@@ -454,6 +467,21 @@ export class TerminalNetwork implements ITerminalNetwork {
 			if (terminalToSellExcess && terminalToSellExcess.cooldown == 0) {
 				this.handleExcess(terminalToSellExcess);
 			}
+			// Order more energy if needed
+			if (Game.market.credits > TraderJoe.settings.market.energyCredits) {
+				let averageEnergy = _.sum(this.terminals, terminal => colonyOf(terminal).assets[RESOURCE_ENERGY] || 0)
+									/ this.terminals.length;
+				if (averageEnergy < TerminalNetwork.settings.buyEnergyThreshold) {
+					let poorestTerminal = minBy(this.terminals,
+												terminal => colonyOf(terminal).assets[RESOURCE_ENERGY] || 0);
+					if (poorestTerminal) {
+						let amount = Energetics.settings.terminal.energy.tradeAmount;
+						Overmind.tradeNetwork.maintainBuyOrder(poorestTerminal, RESOURCE_ENERGY, amount,
+															   MAX_ENERGY_BUY_ORDERS);
+					}
+				}
+			}
+
 		}
 		// Do notifications
 		if (this.notifications.length > 0) {

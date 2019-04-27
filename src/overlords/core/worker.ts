@@ -1,15 +1,17 @@
-import {Overlord} from '../Overlord';
+import {Overlord, ZergOptions} from '../Overlord';
 import {Colony, ColonyStage, DEFCON} from '../../Colony';
 import {profile} from '../../profiler/decorator';
 import {Zerg} from '../../zerg/Zerg';
 import {Tasks} from '../../tasks/Tasks';
 import {OverlordPriority} from '../../priorities/priorities_overlords';
-import {BuildPriorities} from '../../priorities/priorities_structures';
+import {BuildPriorities, FortifyPriorities} from '../../priorities/priorities_structures';
 import {$} from '../../caching/GlobalCache';
 import {Task} from '../../tasks/Task';
 import {Cartographer, ROOMTYPE_CONTROLLER} from '../../utilities/Cartographer';
 import {Roles, Setups} from '../../creepSetups/setups';
-import {maxBy} from '../../utilities/utils';
+import {boostResources} from '../../resources/map_resources';
+import {TerminalState_Rebuild} from '../../directives/terminalState/terminalState_rebuild';
+import {minBy} from '../../utilities/utils';
 
 /**
  * Spawns general-purpose workers, which maintain a colony, performing actions such as building, repairing, fortifying,
@@ -26,6 +28,7 @@ export class WorkerOverlord extends Overlord {
 	criticalBarriers: (StructureWall | StructureRampart)[];
 	constructionSites: ConstructionSite[];
 	nukeDefenseRamparts: StructureRampart[];
+	nukeDefenseHitsRemaining: { [id: string]: number };
 
 	static settings = {
 		barrierHits         : {			// What HP to fortify barriers to at each RCL
@@ -45,7 +48,6 @@ export class WorkerOverlord extends Overlord {
 
 	constructor(colony: Colony, priority = OverlordPriority.ownedRoom.work) {
 		super(colony, 'worker', priority);
-		this.workers = this.zerg(Roles.worker);
 		// Compute barriers needing fortification or critical attention
 		this.fortifyBarriers = $.structures(this, 'fortifyBarriers', () =>
 			_.sortBy(_.filter(this.room.barriers, s =>
@@ -99,23 +101,43 @@ export class WorkerOverlord extends Overlord {
 				}
 			}
 		});
+
 		// Nuke defense ramparts needing fortification
+		this.nukeDefenseRamparts = [];
+		this.nukeDefenseHitsRemaining = {};
 		if (this.room.find(FIND_NUKES).length > 0) {
-			this.nukeDefenseRamparts = _.filter(this.colony.room.ramparts, rampart => {
-				let neededHits = WorkerOverlord.settings.barrierHits[this.colony.level];
-				for (let nuke of rampart.pos.lookFor(LOOK_NUKES)) {
-					neededHits += 10e6;
+			for (let rampart of this.colony.room.ramparts) {
+				let neededHits = this.neededRampartHits(rampart);
+				if (rampart.hits < neededHits) {
+					this.nukeDefenseRamparts.push(rampart);
+					this.nukeDefenseHitsRemaining[rampart.id] = neededHits - rampart.hits;
 				}
-				for (let nuke of rampart.pos.findInRange(FIND_NUKES, 3)) {
-					if (nuke.pos != rampart.pos) {
-						neededHits += 5e5;
-					}
-				}
-				return rampart.hits < neededHits;
-			});
-		} else {
-			this.nukeDefenseRamparts = [];
+			}
 		}
+
+		// Spawn boosted workers if there is significant fortifying which needs to be done
+		let opts: ZergOptions = {};
+		let totalNukeDefenseHitsRemaining = _.sum(_.values(this.nukeDefenseHitsRemaining));
+		let approximateRepairPowerPerLifetime = REPAIR_POWER * 50 / 3 * CREEP_LIFE_TIME;
+		if (totalNukeDefenseHitsRemaining > 3 * approximateRepairPowerPerLifetime) {
+			opts.boostWishlist = [boostResources.construct[3]];
+		}
+
+		// Register workers
+		this.workers = this.zerg(Roles.worker, opts);
+	}
+
+	private neededRampartHits(rampart: StructureRampart): number {
+		let neededHits = WorkerOverlord.settings.barrierHits[this.colony.level];
+		for (let nuke of rampart.pos.lookFor(LOOK_NUKES)) {
+			neededHits += 10e6;
+		}
+		for (let nuke of rampart.pos.findInRange(FIND_NUKES, 3)) {
+			if (nuke.pos != rampart.pos) {
+				neededHits += 5e6;
+			}
+		}
+		return neededHits;
 	}
 
 	refresh() {
@@ -281,17 +303,16 @@ export class WorkerOverlord extends Overlord {
 	}
 
 	private nukeFortifyActions(worker: Zerg, fortifyStructures = this.nukeDefenseRamparts): boolean {
-		let target = maxBy(fortifyStructures, rampart => {
-			let neededHits = WorkerOverlord.settings.barrierHits[this.colony.level];
-			for (let nuke of rampart.pos.lookFor(LOOK_NUKES)) {
-				neededHits += 10e6;
-			}
-			for (let nuke of rampart.pos.findInRange(FIND_NUKES, 3)) {
-				if (nuke.pos != rampart.pos) {
-					neededHits += 5e5;
+		let target = minBy(fortifyStructures, rampart => {
+			let structuresUnderRampart = rampart.pos.lookFor(LOOK_STRUCTURES);
+			return _.min(_.map(structuresUnderRampart, structure => {
+				let priority = _.findIndex(FortifyPriorities, sType => sType == structure.structureType);
+				if (priority >= 0) { // if found
+					return priority;
+				} else { // not found
+					return 999;
 				}
-			}
-			return neededHits - rampart.hits;
+			}));
 		});
 		if (target) {
 			worker.task = Tasks.fortify(target);
@@ -330,7 +351,7 @@ export class WorkerOverlord extends Overlord {
 				if (this.buildActions(worker)) return;
 			}
 			// Build ramparts to block incoming nuke
-			if (this.nukeDefenseRamparts.length > 0) {
+			if (this.nukeDefenseRamparts.length > 0 && this.colony.terminalState != TerminalState_Rebuild) {
 				if (this.nukeFortifyActions(worker, this.nukeDefenseRamparts)) return;
 			}
 			// Build and maintain roads

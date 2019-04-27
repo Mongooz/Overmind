@@ -140,6 +140,8 @@ interface IOverseer {
 
 	registerOverlord(overlord: any): void;
 
+	getOverlordsForColony(colony: any): any[];
+
 	isOverlordSuspended(overlord: any): boolean;
 
 	suspendOverlordFor(overlord: any, ticks: number): void;
@@ -158,7 +160,7 @@ interface IOverseer {
 
 interface TerminalState {
 	name: string,
-	type: 'in' | 'out',
+	type: 'in' | 'out' | 'in/out',
 	amounts: { [resourceType: string]: number },
 	tolerance: number,
 }
@@ -192,9 +194,11 @@ interface ITradeNetwork {
 	sellDirectly(terminal: StructureTerminal, resource: ResourceConstant, amount?: number,
 				 flexibleAmount?: boolean): number | undefined;
 
-	sell(terminal: StructureTerminal, resource: ResourceConstant, amount?: number): number | undefined;
+	sell(terminal: StructureTerminal, resource: ResourceConstant, amount: number, maxOrdersOfType?: number): number | undefined;
 
 	buy(terminal: StructureTerminal, mineralType: ResourceConstant, amount: number): void;
+
+	maintainBuyOrder(terminal: StructureTerminal, resource: ResourceConstant, amount: number, maxOrdersOfType?: number): void;
 
 	init(): void;
 

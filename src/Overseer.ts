@@ -111,6 +111,10 @@ export class Overseer implements IOverseer {
 		this.overlordsByColony[overlord.colony.name].push(overlord);
 	}
 
+	getOverlordsForColony(colony: Colony): Overlord[] {
+		return this.overlordsByColony[colony.name];
+	}
+
 	private removeOverlord(overlord: Overlord): void {
 		_.remove(this.overlords, o => o.ref == overlord.ref);
 		if (this.overlordsByColony[overlord.colony.name]) {
@@ -200,7 +204,7 @@ export class Overseer implements IOverseer {
 
 	private handleColonyInvasions(colony: Colony) {
 		// Defend against invasions in owned rooms
-		if (colony.room && colony.level >= DirectiveInvasionDefense.requiredRCL) {
+		if (colony.room) {
 
 			// See if invasion is big enough to warrant creep defenses
 			let effectiveInvaderCount = _.sum(_.map(colony.room.hostiles,
@@ -251,7 +255,10 @@ export class Overseer implements IOverseer {
 	}
 
 	private handleNewOutposts(colony: Colony) {
-		let numSources = _.sum(colony.roomNames, roomName => (Memory.rooms[roomName][_RM.SOURCES] || []).length);
+		let numSources = _.sum(colony.roomNames,
+							   roomName => Memory.rooms[roomName] && Memory.rooms[roomName][_RM.SOURCES]
+										   ? Memory.rooms[roomName][_RM.SOURCES]!.length
+										   : 0);
 		let numRemotes = numSources - colony.room.sources.length;
 		if (numRemotes < Colony.settings.remoteSourcesByLevel[colony.level]) {
 

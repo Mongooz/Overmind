@@ -5,6 +5,8 @@ import {CombatIntel} from '../intel/CombatIntel';
 import {$} from '../caching/GlobalCache';
 import {CombatTargeting} from '../targeting/CombatTargeting';
 import {WorkerOverlord} from '../overlords/core/worker';
+import {TerminalState_Rebuild} from '../directives/terminalState/terminalState_rebuild';
+import {log} from '../console/log';
 
 
 /**
@@ -166,11 +168,24 @@ export class SporeCrawler extends HiveCluster {
 		// Towers build nuke response ramparts
 		let nearbyNukeRamparts = _.filter(this.colony.overlords.work.nukeDefenseRamparts,
 										  rampart => this.pos.getRangeTo(rampart) <= TOWER_OPTIMAL_RANGE);
-		if (nearbyNukeRamparts.length > 0) {
-			for (let tower of this.towers) {
-				tower.repair(nearbyNukeRamparts[0]);
+		if (nearbyNukeRamparts.length > 0 && this.colony.terminal
+			&& this.colony.terminalState != TerminalState_Rebuild) {
+			let nukes = this.colony.room.find(FIND_NUKES);
+			let timeToImpact = _.min(_.map(nukes, nuke => nuke.timeToLand));
+			if (timeToImpact) {
+				let repairHitsRemaining = _.sum(_.values(this.colony.overlords.work.nukeDefenseHitsRemaining));
+				let hitsRepairedPerTick = this.towers.length * TOWER_POWER_REPAIR;
+				// Only repair using towers if it looks like you won't finish repairs in time
+				if (repairHitsRemaining > 0.9 * hitsRepairedPerTick * timeToImpact) {
+					for (let tower of this.towers) {
+						tower.repair(nearbyNukeRamparts[0]);
+					}
+					return;
+				}
+			} else {
+				// Shouldn't get here
+				log.warning(`No time to impact! (Why?)`);
 			}
-			return;
 		}
 
 		// Prevent rampart decay at early RCL
